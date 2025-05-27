@@ -1,6 +1,8 @@
 # Accuracy-Assessment
 #To find the country boundaries, use this link: https://gadm.org/download_country.html 
 
+# To have an appreciation of what one should expect from the code, a pdf document with results is provided #
+
                                                    ##### CHECKING THE COUNTRY SHAPEFILE #####
                                                                 ## PARAGUAY ##
 
