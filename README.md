@@ -693,406 +693,78 @@ folium.LayerControl().add_to(map)
 #map.save("reclassified_map_with_gfw_2020.html")
 map
 
-                                                #### CALCULATING FOREST COVER IN HECTARES ####
-                                                          ### PARAGUAY###
-
-import geopandas as gpd
+##CALCULATING FOREST COVER ESTIMATES FOR PARAGUAY, ZAMBIA AND ZIMBABWE
 import ee
-import folium
-import geemap
-
-# Authenticate and Initialize Earth Engine
-ee.Authenticate()
 ee.Initialize()
 
-# Load the shapefile as AOI
-shapefile_path = "C:\\Users\\49176\\Downloads\\ParaguayShape.zip"
-shapefile_inside_zip = f"/vsizip/{shapefile_path}/ParaguayShape.shp"
-aoi_gdf = gpd.read_file(shapefile_inside_zip)
-print(f"Number of features in AOI: {len(aoi_gdf)}")
-print("First feature of AOI:")
-print(aoi_gdf.iloc[0])
+# Hansen GFC
+gfc = ee.Image("UMD/hansen/global_forest_change_2024_v1_12")
+treecover2000 = gfc.select("treecover2000")
+lossyear = gfc.select("lossyear")  # 1 = 2001 ... 22 = 2022
+pixel_area = ee.Image.pixelArea().divide(10000)  # m² → ha
 
-# Convert AOI to Earth Engine FeatureCollection
-aoi = geemap.gdf_to_ee(aoi_gdf)
+# Countries to process
+countries = ["Paraguay", "Zambia", "Zimbabwe"]
 
-# Dynamically compute AOI centroid for map centering
-aoi_centroid = aoi.geometry().centroid().coordinates().getInfo()
-center = [aoi_centroid[1], aoi_centroid[0]]  # Convert to [latitude, longitude]
+# Canopy threshold for defining 2000 forest
+CANOPY_THRESHOLD = 10   # change to 30 for GFW-style forest
 
-# Create a folium map
-map = folium.Map(location=center, zoom_start=6)
+# Loop over countries
+for country_name in countries:
 
-# Define a function to add Earth Engine layers to folium map
-def add_ee_layer(self, ee_object, vis_params, name):
-    """Function to add Earth Engine layers to a folium map."""
-    if isinstance(ee_object, ee.ImageCollection):
-        ee_object = ee_object.mosaic()  # Combine into a single image
-    map_id_dict = ee.Image(ee_object).getMapId(vis_params)
-    folium.TileLayer(
-        tiles=map_id_dict['tile_fetcher'].url_format,
-        attr="Map Data &copy; Google Earth Engine",
-        name=name,
-        overlay=True,
-        control=True,
-    ).add_to(self)
+    # Load boundary
+    country = ee.FeatureCollection("FAO/GAUL/2015/level0") \
+        .filter(ee.Filter.eq("ADM0_NAME", country_name))
 
-# Bind the method to the folium map instance
-folium.Map.add_ee_layer = add_ee_layer
+    # Forest in 2000
+    forest2000 = treecover2000.gt(CANOPY_THRESHOLD)
 
-# Add AOI boundary to the map
-map.add_ee_layer(aoi.style(color="red", width=2), {}, "AOI Boundary")
-
-# Function to reclassify datasets and calculate forest area
-def reclassify_and_calculate_area(dataset_name, scale=500):
-    """Reclassifies dataset to binary forest/non-forest, calculates total forest area, and visualizes on the map."""
-    forest = None
-    if dataset_name == "DynamicWorld":
-        dynamic_world = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1') \
-            .filterBounds(aoi) \
-            .filterDate('2020-01-01', '2020-12-31')
-        forest = dynamic_world.select('trees').mean().gt(0.4)  # Threshold for forest
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "DynamicWorld Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
+    # Compute 2000 forest area
+    area2000_dict = forest2000.multiply(pixel_area) \
+        .reduceRegion(
             reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
+            geometry=country.geometry(),
+            scale=30,
+            maxPixels=1e13
         ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"DynamicWorld Total Forest Area (ha): {forest_area_ha}")
 
-    elif dataset_name == "PALSAR":
-        palsar = ee.ImageCollection("JAXA/ALOS/PALSAR/YEARLY/FNF4") \
-            .filterBounds(aoi) \
-            .filterDate('2020-01-01', '2020-12-31') \
-            .mosaic()
-        forest = palsar.select('fnf').eq(1).Or(palsar.select('fnf').eq(2))  # Class 1 and 2 are forests
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "PALSAR Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"PALSAR Total Forest Area (ha): {forest_area_ha}")
+    forest2000_area = area2000_dict.get('treecover2000', 0)
 
-    elif dataset_name == "GFW":
-        hansen_data = ee.Image('UMD/hansen/global_forest_change_2022_v1_10')
-        treecover2000 = hansen_data.select('treecover2000').clip(aoi)
-        loss = hansen_data.select('lossyear').clip(aoi)
-        loss_mask_2020 = loss.eq(20)
-        forest_cover_after_loss = treecover2000.updateMask(loss_mask_2020.Not())
-        forest = forest_cover_after_loss.gt(2)
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "GFW Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"GFW Total Forest Area (ha): {forest_area_ha}")
+    print(f"\n==================== {country_name} ====================")
+    print(f"Forest in 2000 (> {CANOPY_THRESHOLD}% canopy): {forest2000_area:,.2f} ha\n")
 
-    elif dataset_name == "ESA":
-        esa_image = ee.ImageCollection('ESA/WorldCover/v100') \
-            .filterDate('2020-01-01', '2020-12-31') \
-            .first().select('Map')
-        forest = esa_image.eq(10)  # Class 10 represents tree cover in ESA WorldCover
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "ESA Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"ESA Total Forest Area (ha): {forest_area_ha}")
+    # For storing cumulative loss
+    cumulative_loss = 0
 
-# Apply reclassification and area calculation for each dataset
-datasets = ["DynamicWorld", "PALSAR", "GFW", "ESA"]
-for dataset in datasets:
-    reclassify_and_calculate_area(dataset)
+    print("Year | Annual Loss (ha) | Cumulative Loss (ha) | Remaining Forest (ha)")
+    print("-----------------------------------------------------------------------")
 
-# Add layer control and save the map
-folium.LayerControl().add_to(map)
-map.save("fixed_reclassified_map.html")
-print("Fixed map saved as fixed_reclassified_map.html")
+    for year in range(2015, 2023):   # 2015–2022
+        loss_index = year - 2000     # Hansen index (15 = 2015)
 
-                                                #### CALCULATING FOREST COVER IN HECTARES ####
-                                                         ##### ZAMBIA #####
-import ee
-import folium
-import geemap
+        # Annual loss mask
+        annual_loss_mask = lossyear.eq(loss_index)
 
-# Authenticate and Initialize Earth Engine
-ee.Authenticate()
-ee.Initialize()
+        # Annual loss area
+        loss_area_dict = annual_loss_mask.multiply(pixel_area) \
+            .reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=country.geometry(),
+                scale=30,
+                maxPixels=1e13
+            ).getInfo()
 
-# Load the shapefile as AOI
-shapefile_path = "C:\\Users\\49176\\Downloads\\ZambiaShape.zip"
-shapefile_inside_zip = f"/vsizip/{shapefile_path}/ZambiaShape.shp"
-aoi_gdf = gpd.read_file(shapefile_inside_zip)
-print(f"Number of features in AOI: {len(aoi_gdf)}")
-print("First feature of AOI:")
-print(aoi_gdf.iloc[0])
+        annual_loss_area = loss_area_dict.get('lossyear', 0)
 
-# Convert AOI to Earth Engine FeatureCollection
-aoi = geemap.gdf_to_ee(aoi_gdf)
+        # Update cumulative loss
+        cumulative_loss += annual_loss_area
 
-# Dynamically compute AOI centroid for map centering
-aoi_centroid = aoi.geometry().centroid().coordinates().getInfo()
-center = [aoi_centroid[1], aoi_centroid[0]]  # Convert to [latitude, longitude]
+        # Remaining forest = baseline 2000 forest − cumulative loss
+        remaining_forest = forest2000_area - cumulative_loss
 
-# Create a folium map
-map = folium.Map(location=center, zoom_start=6)
+        # Print formatted
+        print(f"{year} | {annual_loss_area:,.2f} | {cumulative_loss:,.2f} | {remaining_forest:,.2f}")
 
-# Define a function to add Earth Engine layers to folium map
-def add_ee_layer(self, ee_object, vis_params, name):
-    """Function to add Earth Engine layers to a folium map."""
-    if isinstance(ee_object, ee.ImageCollection):
-        ee_object = ee_object.mosaic()  # Combine into a single image
-    map_id_dict = ee.Image(ee_object).getMapId(vis_params)
-    folium.TileLayer(
-        tiles=map_id_dict['tile_fetcher'].url_format,
-        attr="Map Data &copy; Google Earth Engine",
-        name=name,
-        overlay=True,
-        control=True,
-    ).add_to(self)
-
-# Bind the method to the folium map instance
-folium.Map.add_ee_layer = add_ee_layer
-
-# Add AOI boundary to the map
-map.add_ee_layer(aoi.style(color="red", width=2), {}, "AOI Boundary")
-
-# Function to reclassify datasets and calculate forest area
-def reclassify_and_calculate_area(dataset_name, scale=500):
-    """Reclassifies dataset to binary forest/non-forest, calculates total forest area, and visualizes on the map."""
-    forest = None
-    if dataset_name == "DynamicWorld":
-        dynamic_world = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1') \
-            .filterBounds(aoi) \
-            .filterDate('2020-01-01', '2020-12-31')
-        forest = dynamic_world.select('trees').mean().gt(0.4)  # Threshold for forest
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "DynamicWorld Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"DynamicWorld Total Forest Area (ha): {forest_area_ha}")
-
-    elif dataset_name == "PALSAR":
-        palsar = ee.ImageCollection("JAXA/ALOS/PALSAR/YEARLY/FNF4") \
-            .filterBounds(aoi) \
-            .filterDate('2020-01-01', '2020-12-31') \
-            .mosaic()
-        forest = palsar.select('fnf').eq(1).Or(palsar.select('fnf').eq(2))  # Class 1 and 2 are forests
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "PALSAR Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"PALSAR Total Forest Area (ha): {forest_area_ha}")
-
-    elif dataset_name == "GFW":
-        hansen_data = ee.Image('UMD/hansen/global_forest_change_2022_v1_10')
-        treecover2000 = hansen_data.select('treecover2000').clip(aoi)
-        loss = hansen_data.select('lossyear').clip(aoi)
-        loss_mask_2020 = loss.eq(20)
-        forest_cover_after_loss = treecover2000.updateMask(loss_mask_2020.Not())
-        forest = forest_cover_after_loss.gt(2)
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "GFW Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"GFW Total Forest Area (ha): {forest_area_ha}")
-
-    elif dataset_name == "ESA":
-        esa_image = ee.ImageCollection('ESA/WorldCover/v100') \
-            .filterDate('2020-01-01', '2020-12-31') \
-            .first().select('Map')
-        forest = esa_image.eq(10)  # Class 10 represents tree cover in ESA WorldCover
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "ESA Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"ESA Total Forest Area (ha): {forest_area_ha}")
-
-# Apply reclassification and area calculation for each dataset
-datasets = ["DynamicWorld", "PALSAR", "GFW", "ESA"]
-for dataset in datasets:
-    reclassify_and_calculate_area(dataset)
-
-# Add layer control and save the map
-folium.LayerControl().add_to(map)
-map.save("fixed_reclassified_map.html")
-print("Fixed map saved as fixed_reclassified_map.html") 
-
-                                           ##### CALCULATING FOREST COVER IN HECTARES ####
-                                                   ##### ZIMBABWE #####
-import ee
-import folium
-import geemap
-
-# Authenticate and Initialize Earth Engine
-ee.Authenticate()
-ee.Initialize()
-
-# Load the shapefile as AOI
-shapefile_path = "C:\\Users\\49176\\Downloads\\ZimbabweShape.zip"
-shapefile_inside_zip = f"/vsizip/{shapefile_path}/ZimbabweShape.shp"
-aoi_gdf = gpd.read_file(shapefile_inside_zip)
-print(f"Number of features in AOI: {len(aoi_gdf)}")
-print("First feature of AOI:")
-print(aoi_gdf.iloc[0])
-
-# Convert AOI to Earth Engine FeatureCollection
-aoi = geemap.gdf_to_ee(aoi_gdf)
-
-# Dynamically compute AOI centroid for map centering
-aoi_centroid = aoi.geometry().centroid().coordinates().getInfo()
-center = [aoi_centroid[1], aoi_centroid[0]]  # Convert to [latitude, longitude]
-
-# Create a folium map
-map = folium.Map(location=center, zoom_start=6)
-
-# Define a function to add Earth Engine layers to folium map
-def add_ee_layer(self, ee_object, vis_params, name):
-    """Function to add Earth Engine layers to a folium map."""
-    if isinstance(ee_object, ee.ImageCollection):
-        ee_object = ee_object.mosaic()  # Combine into a single image
-    map_id_dict = ee.Image(ee_object).getMapId(vis_params)
-    folium.TileLayer(
-        tiles=map_id_dict['tile_fetcher'].url_format,
-        attr="Map Data &copy; Google Earth Engine",
-        name=name,
-        overlay=True,
-        control=True,
-    ).add_to(self)
-
-# Bind the method to the folium map instance
-folium.Map.add_ee_layer = add_ee_layer
-
-# Add AOI boundary to the map
-map.add_ee_layer(aoi.style(color="red", width=2), {}, "AOI Boundary")
-
-# Function to reclassify datasets and calculate forest area
-def reclassify_and_calculate_area(dataset_name, scale=500):
-    """Reclassifies dataset to binary forest/non-forest, calculates total forest area, and visualizes on the map."""
-    forest = None
-    if dataset_name == "DynamicWorld":
-        dynamic_world = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1') \
-            .filterBounds(aoi) \
-            .filterDate('2020-01-01', '2020-12-31')
-        forest = dynamic_world.select('trees').mean().gt(0.4)  # Threshold for forest
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "DynamicWorld Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"DynamicWorld Total Forest Area (ha): {forest_area_ha}")
-
-    elif dataset_name == "PALSAR":
-        palsar = ee.ImageCollection("JAXA/ALOS/PALSAR/YEARLY/FNF4") \
-            .filterBounds(aoi) \
-            .filterDate('2020-01-01', '2020-12-31') \
-            .mosaic()
-        forest = palsar.select('fnf').eq(1).Or(palsar.select('fnf').eq(2))  # Class 1 and 2 are forests
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "PALSAR Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"PALSAR Total Forest Area (ha): {forest_area_ha}")
-
-    elif dataset_name == "GFW":
-        hansen_data = ee.Image('UMD/hansen/global_forest_change_2022_v1_10')
-        treecover2000 = hansen_data.select('treecover2000').clip(aoi)
-        loss = hansen_data.select('lossyear').clip(aoi)
-        loss_mask_2020 = loss.eq(20)
-        forest_cover_after_loss = treecover2000.updateMask(loss_mask_2020.Not())
-        forest = forest_cover_after_loss.gt(2)
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "GFW Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"GFW Total Forest Area (ha): {forest_area_ha}")
-
-    elif dataset_name == "ESA":
-        esa_image = ee.ImageCollection('ESA/WorldCover/v100') \
-            .filterDate('2020-01-01', '2020-12-31') \
-            .first().select('Map')
-        forest = esa_image.eq(10)  # Class 10 represents tree cover in ESA WorldCover
-        map.add_ee_layer(forest, {'min': 0, 'max': 1, 'palette': ['white', 'green']}, "ESA Forest")
-        # Calculate forest area
-        forest_area = ee.Image.pixelArea().updateMask(forest).reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi.geometry(),
-            scale=scale,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-        forest_area_ha = forest_area.get('area', 0) / 10000
-        print(f"ESA Total Forest Area (ha): {forest_area_ha}")
-
-# Apply reclassification and area calculation for each dataset
-datasets = ["DynamicWorld", "PALSAR", "GFW", "ESA"]
-for dataset in datasets:
-    reclassify_and_calculate_area(dataset)
-
-# Add layer control and save the map
-folium.LayerControl().add_to(map)
-map.save("fixed_reclassified_map.html")
-print("Fixed map saved as fixed_reclassified_map.html") 
 
                                               ###### CHECKING THE NICFI POINTS ####
                                                       #### PARAGUAY #####
